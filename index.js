@@ -1,14 +1,54 @@
 const express = require('express');
 const cors = require('cors');
+require('dotenv').config()
 const app = express();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); 
 const port = process.env.PORT || 3100;
+
+const admin = require("firebase-admin");
+
+const serviceAccount = require("./firebase-admin-sdk.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
 
 // middleware
 app.use(cors())
 app.use(express.json())
 
-const uri = "mongodb+srv://smartDbUser:IpIEq5L7TbKS8TDB@cluster0.vtqh62q.mongodb.net/?appName=Cluster0";
+const logger = (req,res,next) => {
+
+    next()
+}
+
+const verifyFirebaseToken = async (req,res,next) =>{
+
+    if(!req.headers.authorization)
+    {
+        return res.status(401).send({message: 'Unauthorized Access'})
+    }
+        const token = req.headers.authorization.split(' ')[1]
+        if(!token)
+        {
+            return res.status(401).send({message: 'Unauthorized Access'})
+        }
+        // verify token
+        try{
+          const userInfo =   await admin.auth().verifyIdToken(token)
+          req.token_email = userInfo.email
+          console.log('after token validation',userInfo)
+
+          next()
+        }
+        catch{
+            return res.status(401).send({message: 'Unauthorized Access'})
+        }
+
+}
+
+const uri = `mongodb+srv://${process.env.DB_User}:${process.env.DB_Pass}@cluster0.vtqh62q.mongodb.net/?appName=Cluster0`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -18,8 +58,6 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   }
 });
-
-
 
 
 app.get('/',(req,res)=>{
@@ -34,10 +72,29 @@ async function run() {
 
     const db = client.db('smart_db')
     const productsCollection = db.collection('products')
+    const bidsCollection = db.collection('bids')
+    const usersCollection = db.collection('users')
 
     app.get('/products',async (req,res)=>{
 
-        const cursor = productsCollection.find();
+        // const projectFields = {title:1,price_min:1,price_max:1,image:1}
+        // const cursor = productsCollection.find().sort({price_min: -1}).skip(2).limit(5).project(projectFields);
+
+        const email = req.query.email;
+        const query = {}
+        if(email)
+        {
+            query.email = email
+        }
+
+
+        const cursor = productsCollection.find(query)
+        const result = await cursor.toArray()
+        res.send(result)
+    })
+
+    app.get('/latest-products',async (req,res)=>{
+        const cursor = productsCollection.find().sort({created_at:-1}).limit(6)
         const result = await cursor.toArray()
         res.send(result)
     })
@@ -78,6 +135,70 @@ async function run() {
         const result = await productsCollection.deleteOne(query) 
         res.send(result)
     })
+
+    // bids related API 
+
+    app.get('/bids',logger,verifyFirebaseToken,async (req,res)=>{
+
+        const email = req.query.email
+         const query = {}
+        if(email)
+        {
+            if(email != req.token_email)
+            {
+                return res.status(403).send({message: 'Forbidden Access'})
+            }
+            query.buyer_email = email
+        }
+
+        const cursor = bidsCollection.find(query)
+        const result = await cursor.toArray()
+        res.send(result)
+    })
+
+    app.get('/products/bids/:productId', verifyFirebaseToken, async (req, res) => {
+
+        const productId = req.params.productId;
+        const query = { product: productId }
+        const cursor = bidsCollection.find(query).sort({ bid_price: -1 })
+        const result = await cursor.toArray();
+        res.send(result);
+    })
+
+    app.post('/bids', async (req,res)=>{
+
+        const newBid = req.body
+        const result = await bidsCollection.insertOne(newBid)
+        res.send(result)
+    })
+
+    app.delete('/bids/:id',async (req,res)=>{
+        const id = req.params.id
+        const query = {_id: new ObjectId(id)}
+        const result = await bidsCollection.deleteOne(query)
+        res.send(result)
+    })
+
+    // users related API
+
+    app.post('/users',async (req,res)=>{
+        const newUser = req.body;
+
+        const email = req.body.email
+        const query = {email:email}
+        const existingUser = await usersCollection.findOne(query)
+
+        if(existingUser)
+        {
+            res.send({message: 'User already Exists, No need to insert'})
+        }
+        else{ 
+        const result = await usersCollection.insertOne(newUser)
+        res.send(result)
+        }
+
+    })
+
 
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
